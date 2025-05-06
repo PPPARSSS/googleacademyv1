@@ -1,0 +1,137 @@
+pip install google-generativeai python-Levenshtein thefuzz
+
+import json
+import os
+import google.generativeai as genai
+from enum import Enum
+from thefuzz import fuzz
+
+#Konfigürasyon Ayarları
+GOOGLE_API_KEY = "AIzaSyD60EeXaIL-fQ3bd7org67eJw5KzEiTrHs"
+QA_FILEPATH = "rag.txt"
+SIMILARITY_THRESHOLD = 50 
+
+try:
+    genai.configure(api_key=GOOGLE_API_KEY)
+except Exception as e:
+    print(f"API yapılandırmasında hata oluştu: {e}")
+
+class ModelChoice(Enum):
+    GEMINI = 'gemini-2.0-flash'
+
+SELECTED_MODEL = ModelChoice.GEMINI
+
+def dosyadan_soru_cevaplari_yukle(dosya_yolu: str) -> list:
+
+    if not os.path.exists(dosya_yolu):
+        return []
+    try:
+        with open(dosya_yolu, 'r', encoding='utf-8') as f:
+            icerik = f.read()
+            if not icerik:
+                return []
+            return json.loads(icerik)
+    except json.JSONDecodeError:
+        print(f"Uyarı: {dosya_yolu} dosyası geçerli JSON formatında değil veya boş. Boş liste ile devam ediliyor.")
+        return []
+    except Exception as e:
+        print(f"Soru-cevaplar yüklenirken hata oluştu: {e}")
+        return []
+
+def dosyaya_soru_cevaplari_kaydet(dosya_yolu: str, veri: list):
+    try:
+        with open(dosya_yolu, 'w', encoding='utf-8') as f:
+            json.dump(veri, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        print(f"Soru-cevaplar kaydedilirken hata oluştu: {e}")
+
+def llm_den_cevap_al(soru: str, model_adi: str = SELECTED_MODEL.value) -> str | None:
+
+    if not GOOGLE_API_KEY or GOOGLE_API_KEY == "AIzaSyD60EeXaIL-fQ3bd7org67eJw5KzEiTrHs":
+        print("Hata: Geçerli bir Google API Anahtarı ayarlanmamış.")
+        print("Lütfen GOOGLE_API_KEY değişkenine kendi anahtarınızı girin.")
+        if GOOGLE_API_KEY == "AIzaSyD60EeXaIL-fQ3bd7org67eJw5KzEiTrHs":
+             print("UYARI: Şu anda sağlanan API anahtarı kullanılıyor. Gerçek kullanım için bu anahtarı kendi anahtarınızla değiştirmelisiniz.")
+
+    try:
+        model = genai.GenerativeModel(model_adi)
+        response = model.generate_content(soru)
+        
+        if response.parts:
+            return "".join(part.text for part in response.parts if hasattr(part, 'text'))
+        elif hasattr(response, 'text') and response.text:
+             return response.text
+        else:
+            if hasattr(response, 'prompt_feedback') and response.prompt_feedback:
+                 print(f"LLM'den cevap alınamadı. Sebep: {response.prompt_feedback.block_reason_message or response.prompt_feedback}")
+            else:
+                 print("LLM'den boş veya beklenmedik formatta cevap alındı.")
+            return None
+    except AttributeError:
+        print("Hata: Google Generative AI modeli başlatılamadı. API anahtarının doğru yapılandırıldığından emin olun.")
+        return None
+    except Exception as e:
+        print(f"LLM ile iletişimde hata oluştu: {e}")
+        return None
+
+def benzer_soru_bul(soru: str, kayitli_sorular: list, esik_deger: int) -> str | None:
+    if not kayitli_sorular:
+        return None
+
+    en_iyi_eslesme_orani = 0
+    en_iyi_cevap = None
+
+    for kayit in kayitli_sorular:
+        oran = fuzz.ratio(soru.lower(), kayit['soru'].lower())
+        if oran > en_iyi_eslesme_orani: # En iyi eşleşmeyi takip et
+            en_iyi_eslesme_orani = oran
+        if oran >= esik_deger:
+            # Eşiği geçen ilk iyi eşleşmeyi döndür
+            print(f"'{kayit['soru']}' sorusu ile %{oran} benzerlik bulundu.")
+            return kayit['cevap']
+    return None
+
+
+def soruyu_isle(soru: str) -> str:
+    print(f"\nSoru: {soru}")
+    kayitli_soru_cevaplar = dosyadan_soru_cevaplari_yukle(QA_FILEPATH)
+
+    cached_answer = benzer_soru_bul(soru, kayitli_soru_cevaplar, SIMILARITY_THRESHOLD)
+
+    if cached_answer:
+        print(f"Cevap önbellekten ({QA_FILEPATH}) alındı.")
+        return cached_answer
+    else:
+        print(f"Benzer soru önbellekte ({QA_FILEPATH}) bulunamadı. LLM'e soruluyor...")
+        llm_cevabi = llm_den_cevap_al(soru)
+
+        if llm_cevabi:
+            print("LLM'den cevap alındı.")
+            kayitli_soru_cevaplar.append({"soru": soru, "cevap": llm_cevabi})
+            dosyaya_soru_cevaplari_kaydet(QA_FILEPATH, kayitli_soru_cevaplar)
+            return llm_cevabi
+        else:
+            return "Üzgünüm, bu soruya şu anda cevap veremiyorum (LLM'den yanıt alınamadı)."
+
+if __name__ == "__main__":
+    print("Maliyet Optimize Edilmiş Soru Cevaplama Sistemi")
+    print("-----------------------------------------------")
+    print(f"Soru-cevap kayıt dosyası: {QA_FILEPATH}")
+    print(f"Benzerlik eşiği: %{SIMILARITY_THRESHOLD}")
+    print("Çıkmak için 'çıkış' yazabilirsiniz.")
+
+    if not os.path.exists(QA_FILEPATH):
+        print(f"Bilgi: {QA_FILEPATH} dosyası bulunamadı. İlk çalıştırmada oluşturulacak.")
+
+    while True:
+        kullanici_sorusu = input("\nLütfen sorunuzu yazın: ")
+        if kullanici_sorusu.lower() == 'çıkış':
+            print("Program sonlandırılıyor.")
+            break
+
+        if not kullanici_sorusu.strip():
+            print("Lütfen geçerli bir soru girin.")
+            continue
+
+        yanit = soruyu_isle(kullanici_sorusu)
+        print(f"\nCevap:\n{yanit}")
